@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>4.1.0</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.astraflow</groupId>
+	<artifactId>astraflow-agent</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>astra-flow-agent</name>
+	<description>通用 AI Agent 中心 — 基于 DDD 分层架构的智能体管理平台</description>
+
+	<properties>
+		<java.version>21</java.version>
+		<spring-ai.version>2.0.0</spring-ai.version>
+		<mapstruct.version>1.6.3</mapstruct.version>
+		<json-schema-validator.version>1.5.6</json-schema-validator.version>
+		<wiremock.version>3.13.1</wiremock.version>
+		<!-- 韧性：2.4.0 是首个支持 Spring Boot 4 / Spring Cloud 5 的版本（JDK 21 基线），
+		     不被 Boot 4.1 BOM 受管，须显式声明版本。详见 docs/tech-selection.md §4 与 change add-llm-and-resilience design D3。 -->
+		<resilience4j.version>2.4.0</resilience4j.version>
+	</properties>
+
+	<dependencies>
+		<!-- Web：REST + SSE（SseEmitter），Spring MVC + 虚拟线程（明确不用 WebFlux） -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+
+		<!-- HTTP 客户端：http_get 工具外发请求用 RestClient（同步阻塞 + 虚拟线程友好）。
+		     Spring Boot 4.x 模块化后 RestClient.Builder 不再随 starter-web 自动装配（spring-boot#50768），
+		     须显式引入 spring-boot-starter-restclient 才能拿到自动装配的 RestClient.Builder bean。版本由 Boot BOM 管。 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-restclient</artifactId>
+		</dependency>
+
+		<!-- 参数校验 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<!-- 安全：API Key 鉴权（Spring Security 6） -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- 持久化：JPA + PostgreSQL + Flyway（选型见 docs/tech-selection.md §3.1） -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-database-postgresql</artifactId>
+		</dependency>
+		<!-- Flyway 自动配置模块：Spring Boot 4.x 将 spring-boot-autoconfigure 拆分为独立模块，
+		     FlywayAutoConfiguration 不再随 flyway-core 自动生效，须显式引入 spring-boot-flyway，
+		     否则 Flyway 不运行、迁移不生效（仅 flyway-core/flyway-database-postgresql 不够）。 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-flyway</artifactId>
+		</dependency>
+
+		<!-- 可观测：Micrometer + Actuator（OTel bridge 留 P2） -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!-- AI 底座：Spring AI 2.0 + DeepSeek（仅 Provider 客户端，循环/工作流引擎用 LangGraph4j，Spike 引入） -->
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-model-deepseek</artifactId>
+		</dependency>
+
+		<!-- 韧性：429/超时指数退避重试 + 连续 5xx CircuitBreaker 熔断（change add-llm-and-resilience）。
+		     装饰 ChatModel Bean（design D2），使图 CallModelAction 与 LlmClient 共享同一韧性底层。
+		     resilience4j-spring-boot4 = Boot 4 专用自动配置；resilience4j-reactor 提供
+		     RetryOperator / CircuitBreakerOperator（Flux<ChatResponse> 装饰，贴合流式语义）。
+		     注：resilience4j-bom 仅管理核心模块，不含 spring-boot4/reactor，须显式声明版本；
+		     二者传递的核心模块（core/retry/circuitbreaker）自动对齐同版本。 -->
+		<dependency>
+			<groupId>io.github.resilience4j</groupId>
+			<artifactId>resilience4j-spring-boot4</artifactId>
+			<version>${resilience4j.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>io.github.resilience4j</groupId>
+			<artifactId>resilience4j-reactor</artifactId>
+			<version>${resilience4j.version}</version>
+		</dependency>
+
+		<!-- AgentLoop/Workflow 引擎：LangGraph4j 1.8.20（spike V1–V10 全 GREEN，版本锁定）。
+		     change add-agent-loop（#4）是首个生产代码使用方，故从 -Pspike profile 提升到主 <dependencies>，
+		     默认构建即纳入（生产版 ReAct 图装配/事件映射/并行工具节点）。版本经 spike 验证、已缓存到本地仓库（D:/Java/repo）。
+		     langgraph4j-springai-agentexecutor 传递依赖 langgraph4j-spring-ai(core)，两者显式声明以防 transitive 被丢。 -->
+		<dependency>
+			<groupId>org.bsc.langgraph4j</groupId>
+			<artifactId>langgraph4j-spring-ai</artifactId>
+			<version>1.8.20</version>
+		</dependency>
+		<dependency>
+			<groupId>org.bsc.langgraph4j</groupId>
+			<artifactId>langgraph4j-springai-agentexecutor</artifactId>
+			<version>1.8.20</version>
+		</dependency>
+
+		<!-- DTO 映射（领域对象手动赋值，见 red-lines.md） -->
+		<dependency>
+			<groupId>org.mapstruct</groupId>
+			<artifactId>mapstruct</artifactId>
+			<version>${mapstruct.version}</version>
+		</dependency>
+
+		<!-- 工具入参 JSON Schema 校验 -->
+		<dependency>
+			<groupId>com.networknt</groupId>
+			<artifactId>json-schema-validator</artifactId>
+			<version>${json-schema-validator.version}</version>
+		</dependency>
+
+		<!-- Lombok -->
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<optional>true</optional>
+		</dependency>
+
+		<!-- 测试 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- HTTP 工具测试：WireMock 起本地 server stub（200 / 5xx / 超时 / 连接失败），测 http_get 真实 HTTP 行为，不触外网。
+		     Spring Boot 4.1 BOM 已不再托管 WireMock（Boot 4.x 与 WireMock 解耦），须显式指定版本；选 standalone 避免传递依赖冲突。 -->
+		<dependency>
+			<groupId>org.wiremock</groupId>
+			<artifactId>wiremock-standalone</artifactId>
+			<version>${wiremock.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<!-- 集成测试：Testcontainers 拉起真实 PostgreSQL 容器。版本由 spring-boot-dependencies BOM(4.1.0) 内 import 的 testcontainers-bom(2.0.5) 管理，不写 version。
+		     注：Testcontainers 2.x 模块 artifactId 已加 testcontainers- 前缀（1.x 为 postgresql/junit-jupiter）。 -->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers-postgresql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers-junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-testcontainers</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.ai</groupId>
+				<artifactId>spring-ai-bom</artifactId>
+				<version>${spring-ai.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+			<!-- 韧性 BOM（design D3 方案 B）。
+			     退路方案 A：改导入 spring-cloud-dependencies:2025.1.2（Boot 4.1 对应 Oakwood，2025.1.1 仅兼容 Boot 4.0）
+			     + 新增 org.springframework.cloud:spring-cloud-starter-circuitbreaker-resilience4j:5.0.2，
+			     并移除下方两个 resilience4j 直接依赖；Flux 装饰改从 CircuitBreakerRegistry 手工构造 Operator。 -->
+			<dependency>
+				<groupId>io.github.resilience4j</groupId>
+				<artifactId>resilience4j-bom</artifactId>
+				<version>${resilience4j.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<finalName>${project.artifactId}</finalName>
+					<excludes>
+						<exclude>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<annotationProcessorPaths>
+						<path>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</path>
+						<path>
+							<groupId>org.mapstruct</groupId>
+							<artifactId>mapstruct-processor</artifactId>
+							<version>${mapstruct.version}</version>
+						</path>
+					</annotationProcessorPaths>
+					<compilerArgs>
+						<arg>-Amapstruct.defaultComponentModel=spring</arg>
+					</compilerArgs>
+					<!-- 默认构建排除 Spike 测试源码（testExclude **/spike/**）；langgraph4j 自 change #4 已提升到主 <dependencies>，此处仅排除 spike 测试代码 -->
+					<testExcludes>
+						<testExclude>**/spike/**</testExclude>
+					</testExcludes>
+				</configuration>
+			</plugin>
+			<!-- 默认构建跳过 @Tag("spike") 测试（Spike 需真实 DEEPSEEK_API_KEY + 网络，opt-in） -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<excludedGroups>spike</excludedGroups>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+	<profiles>
+		<!--
+			Spike：路线②（LangGraph4j）验证 profile。opt-in。
+			需：DEEPSEEK_API_KEY + 对 api.deepseek.com 外联 + 内网 Nexus 代理 org.bsc.langgraph4j（R2）。
+			用法：./mvnw.cmd -Pspike test  （见 docs/spike-report.md 头部运行手册）
+		-->
+		<profile>
+			<id>spike</id>
+			<build>
+				<plugins>
+					<!-- 清空默认 testExcludes → 编译 Spike 源码 -->
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-compiler-plugin</artifactId>
+						<configuration>
+							<testExcludes combine.self="override"/>
+						</configuration>
+					</plugin>
+					<!-- 仅跑 @Tag("spike")；单 fork 串行 + 字母序保证证据文件跨类一致、汇总器(Z_)排序最后 -->
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<groups>spike</groups>
+							<excludedGroups combine.self="override"/>
+							<runOrder>alphabetical</runOrder>
+							<forkCount>1</forkCount>
+							<reuseForks>true</reuseForks>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
+</project>

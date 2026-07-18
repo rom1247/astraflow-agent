@@ -1,0 +1,14 @@
+# 测试 profile：与主 application.yml 合并（不覆盖主配置，仅覆盖需差异化的项）
+# 修复主配置 spring.ai.deepseek.api-key: ${DEEPSEEK_API_KEY} 无默认值导致上下文启动失败的陷阱。
+# datasource / Flyway / JPA(ddl-auto: validate) 均沿用主配置 + @ServiceConnection 自动注入。
+#
+# base-url：resilience 集成测试（ResilientChatModelTest 等）手工装配指向 WireMock 动态端口，不读此值；
+# 此处仅给自动装配的 DeepSeekChatModel Bean 一个无害默认，避免持久化测试（@SpringBootTest）加载上下文时
+# 占位符 ${wiremock.port} 无法解析。持久化测试不调用 LLM，Bean 不发起真实连接，http://localhost:0 安全。
+spring:
+  ai:
+    deepseek:
+      api-key: dummy-test-key
+      base-url: http://localhost:${wiremock.port:0}
+      chat:
+        model: deepseek-v4-flash
